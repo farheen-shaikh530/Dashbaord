@@ -1,0 +1,416 @@
+from flask import Flask, jsonify, request, send_from_directory
+from flask_cors import CORS
+import sqlite3
+from datetime import datetime
+import os
+
+app = Flask(__name__, static_folder='../frontend/build', static_url_path='')
+CORS(app)
+
+# Initialize database
+def init_db():
+    conn = sqlite3.connect('healthcare.db')
+    c = conn.cursor()
+    
+    # Patients table
+    c.execute('''CREATE TABLE IF NOT EXISTS patients
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  name TEXT NOT NULL,
+                  age INTEGER,
+                  gender TEXT,
+                  contact TEXT,
+                  registered_date TEXT)''')
+    
+    # Vital signs table
+    c.execute('''CREATE TABLE IF NOT EXISTS vitals
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  patient_id INTEGER,
+                  temperature REAL,
+                  heart_rate INTEGER,
+                  blood_pressure TEXT,
+                  oxygen_level INTEGER,
+                  timestamp TEXT,
+                  FOREIGN KEY (patient_id) REFERENCES patients (id))''')
+    
+    # Appointments table
+    c.execute('''CREATE TABLE IF NOT EXISTS appointments
+                 (id INTEGER PRIMARY KEY AUTOINCREMENT,
+                  patient_id INTEGER,
+                  doctor_name TEXT,
+                  date TEXT,
+                  time TEXT,
+                  reason TEXT,
+                  status TEXT DEFAULT 'Scheduled',
+                  FOREIGN KEY (patient_id) REFERENCES patients (id))''')
+    
+    # Add some sample data if tables are empty
+    c.execute("SELECT COUNT(*) FROM patients")
+    if c.fetchone()[0] == 0:
+        sample_patients = [
+            ('John Doe', 35, 'Male', '555-0101', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+            ('Jane Smith', 28, 'Female', '555-0102', datetime.now().strftime('%Y-%m-%d %H:%M:%S')),
+            ('Alex Johnson', 42, 'Other', '555-0103', datetime.now().strftime('%Y-%m-%d %H:%M:%S'))
+        ]
+        c.executemany("INSERT INTO patients (name, age, gender, contact, registered_date) VALUES (?, ?, ?, ?, ?)", sample_patients)
+        
+        # Add sample vitals
+        c.execute("SELECT id FROM patients")
+        patient_ids = [row[0] for row in c.fetchall()]
+        for pid in patient_ids:
+            for i in range(5):
+                timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                c.execute("INSERT INTO vitals (patient_id, temperature, heart_rate, blood_pressure, oxygen_level, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+                          (pid, 98.6 - (i*0.1), 72 + (i*2), f"{120-i}-{80-i}", 98 - (i*2), timestamp))
+        
+        # Add sample appointments
+        sample_appointments = [
+            (patient_ids[0], 'Dr. Smith', '2023-06-15', '10:00', 'Annual checkup'),
+            (patient_ids[1], 'Dr. Johnson', '2023-06-15', '11:00', 'Follow-up'),
+            (patient_ids[2], 'Dr. Williams', '2023-06-16', '09:30', 'Consultation')
+        ]
+        c.executemany("INSERT INTO appointments (patient_id, doctor_name, date, time, reason) VALUES (?, ?, ?, ?, ?)", sample_appointments)
+    
+    conn.commit()
+    conn.close()
+
+init_db()
+
+# API Routes
+@app.route('/api/patients', methods=['GET', 'POST'])
+def patients():
+    conn = sqlite3.connect('healthcare.db')
+    c = conn.cursor()
+    
+    if request.method == 'GET':
+        c.execute("SELECT * FROM patients")
+        patients = c.fetchall()
+        conn.close()
+        return jsonify([dict(zip(['id', 'name', 'age', 'gender', 'contact', 'registered_date'], p)) for p in patients])
+    
+    elif request.method == 'POST':
+        data = request.json
+        registered_date = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        c.execute("INSERT INTO patients (name, age, gender, contact, registered_date) VALUES (?, ?, ?, ?, ?)",
+                  (data['name'], data['age'], data['gender'], data['contact'], registered_date))
+        conn.commit()
+        patient_id = c.lastrowid
+        conn.close()
+        return jsonify({'id': patient_id}), 201
+
+@app.route('/api/vitals', methods=['POST'])
+def add_vitals():
+    data = request.json
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    
+    conn = sqlite3.connect('healthcare.db')
+    c = conn.cursor()
+    c.execute("INSERT INTO vitals (patient_id, temperature, heart_rate, blood_pressure, oxygen_level, timestamp) VALUES (?, ?, ?, ?, ?, ?)",
+              (data['patient_id'], data['temperature'], data['heart_rate'], data['blood_pressure'], data['oxygen_level'], timestamp))
+    conn.commit()
+    conn.close()
+    
+    return jsonify({'message': 'Vitals recorded successfully'}), 201
+
+@app.route('/api/vitals/<int:patient_id>', methods=['GET'])
+def get_vitals(patient_id):
+    conn = sqlite3.connect('healthcare.db')
+    c = conn.cursor()
+    c.execute("SELECT * FROM vitals WHERE patient_id = ? ORDER BY timestamp DESC", (patient_id,))
+    vitals = c.fetchall()
+    conn.close()
+    
+    return jsonify([dict(zip(['id', 'patient_id', 'temperature', 'heart_rate', 'blood_pressure', 'oxygen_level', 'timestamp'], v)) for v in vitals])
+
+@app.route('/api/appointments', methods=['GET', 'POST'])
+def appointments():
+    conn = sqlite3.connect('healthcare.db')
+    c = conn.cursor()
+    
+    if request.method == 'GET':
+        c.execute("SELECT * FROM appointments")
+        appointments = c.fetchall()
+        conn.close()
+        return jsonify([dict(zip(['id', 'patient_id', 'doctor_name', 'date', 'time', 'reason', 'status'], a)) for a in appointments])
+    
+    elif request.method == 'POST':
+        data = request.json
+        c.execute("INSERT INTO appointments (patient_id, doctor_name, date, time, reason) VALUES (?, ?, ?, ?, ?)",
+                  (data['patient_id'], data['doctor_name'], data['date'], data['time'], data['reason']))
+        conn.commit()
+        appointment_id = c.lastrowid
+        conn.close()
+        return jsonify({'id': appointment_id}), 201
+
+@app.route('/api/dashboard/stats', methods=['GET'])
+def dashboard_stats():
+    conn = sqlite3.connect('healthcare.db')
+    c = conn.cursor()
+    
+    # Total patients
+    c.execute("SELECT COUNT(*) FROM patients")
+    total_patients = c.fetchone()[0]
+    
+    # Today's appointments
+    today = datetime.now().strftime('%Y-%m-%d')
+    c.execute("SELECT COUNT(*) FROM appointments WHERE date = ?", (today,))
+    todays_appointments = c.fetchone()[0]
+    
+    # Critical vitals (example: oxygen level < 90)
+    c.execute("SELECT COUNT(DISTINCT patient_id) FROM vitals WHERE oxygen_level < 90")
+    critical_patients = c.fetchone()[0]
+    
+    conn.close()
+    
+    return jsonify({
+        'total_patients': total_patients,
+        'todays_appointments': todays_appointments,
+        'critical_patients': critical_patients
+    })
+
+# Frontend HTML/JS
+@app.route('/')
+def serve():
+    return """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Healthcare Dashboard</title>
+    <script src="https://unpkg.com/react@18/umd/react.development.js"></script>
+    <script src="https://unpkg.com/react-dom@18/umd/react-dom.development.js"></script>
+    <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+    <script src="https://unpkg.com/@mui/material@5.14.10/umd/material-ui.development.js"></script>
+    <script src="https://unpkg.com/chart.js@4.3.0/dist/chart.umd.js"></script>
+    <script src="https://unpkg.com/react-chartjs-2@5.2.0/dist/react-chartjs-2.umd.js"></script>
+    <script src="https://unpkg.com/@emotion/react@11.11.1/dist/emotion-react.umd.min.js"></script>
+    <script src="https://unpkg.com/@emotion/styled@11.11.0/dist/emotion-styled.umd.min.js"></script>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            margin: 0;
+            padding: 0;
+            background-color: #f5f5f5;
+        }
+        .container {
+            padding: 20px;
+        }
+    </style>
+</head>
+<body>
+    <div id="root"></div>
+
+    <script type="text/babel">
+        const { useState, useEffect } = React;
+        const { Line, Bar, Pie } = ReactChartJS2;
+        const {
+            Card, CardContent, Typography, Grid,
+            Table, TableBody, TableCell, TableContainer,
+            TableHead, TableRow, Paper,
+            ThemeProvider, createTheme, CssBaseline
+        } = MaterialUI;
+
+        const Dashboard = () => {
+            const [stats, setStats] = useState({});
+            const [patients, setPatients] = useState([]);
+            const [appointments, setAppointments] = useState([]);
+            const [vitals, setVitals] = useState([]);
+
+            useEffect(() => {
+                fetch('/api/dashboard/stats')
+                    .then(res => res.json())
+                    .then(data => setStats(data));
+                    
+                fetch('/api/patients')
+                    .then(res => res.json())
+                    .then(data => setPatients(data));
+                    
+                fetch('/api/appointments')
+                    .then(res => res.json())
+                    .then(data => setAppointments(data.filter(a => a.status === 'Scheduled')));
+                    
+                fetch('/api/vitals/1') // Example patient ID
+                    .then(res => res.json())
+                    .then(data => setVitals(data));
+            }, []);
+
+            const vitalData = {
+                labels: vitals.map(v => new Date(v.timestamp).toLocaleTimeString()),
+                datasets: [
+                    {
+                        label: 'Heart Rate',
+                        data: vitals.map(v => v.heart_rate),
+                        borderColor: 'rgba(255, 99, 132, 1)',
+                        backgroundColor: 'rgba(255, 99, 132, 0.2)',
+                        tension: 0.1
+                    },
+                    {
+                        label: 'Oxygen Level',
+                        data: vitals.map(v => v.oxygen_level),
+                        borderColor: 'rgba(54, 162, 235, 1)',
+                        backgroundColor: 'rgba(54, 162, 235, 0.2)',
+                        tension: 0.1
+                    }
+                ]
+            };
+
+            const patientDemographics = {
+                labels: ['Male', 'Female', 'Other'],
+                datasets: [{
+                    data: [
+                        patients.filter(p => p.gender === 'Male').length,
+                        patients.filter(p => p.gender === 'Female').length,
+                        patients.filter(p => p.gender !== 'Male' && p.gender !== 'Female').length
+                    ],
+                    backgroundColor: [
+                        'rgba(54, 162, 235, 0.6)',
+                        'rgba(255, 99, 132, 0.6)',
+                        'rgba(255, 206, 86, 0.6)'
+                    ]
+                }]
+            };
+
+            return (
+                <div style={{ padding: '20px' }}>
+                    <Typography variant="h4" gutterBottom>Healthcare Dashboard</Typography>
+                    
+                    <Grid container spacing={3}>
+                        <Grid item xs={12} md={4}>
+                            <Card>
+                                <CardContent>
+                                    <Typography color="textSecondary">Total Patients</Typography>
+                                    <Typography variant="h4">{stats.total_patients || 0}</Typography>
+                                </CardContent>
+                            </Card>
+                        </Grid>
+                        <Grid item xs={12} md={4}>
+                            <Card>
+                                <CardContent>
+                                    <Typography color="textSecondary">Today's Appointments</Typography>
+                                    <Typography variant="h4">{stats.todays_appointments || 0}</Typography>
+                                </CardContent>
+                            </Card>
+                        </Grid>
+                        <Grid item xs={12} md={4}>
+                            <Card>
+                                <CardContent>
+                                    <Typography color="textSecondary">Critical Patients</Typography>
+                                    <Typography variant="h4">{stats.critical_patients || 0}</Typography>
+                                </CardContent>
+                            </Card>
+                        </Grid>
+                    </Grid>
+                    
+                    <Grid container spacing={3} style={{ marginTop: '20px' }}>
+                        <Grid item xs={12} md={6}>
+                            <Card>
+                                <CardContent>
+                                    <Typography variant="h6" gutterBottom>Patient Vitals</Typography>
+                                    <Line data={vitalData} />
+                                </CardContent>
+                            </Card>
+                        </Grid>
+                        <Grid item xs={12} md={6}>
+                            <Card>
+                                <CardContent>
+                                    <Typography variant="h6" gutterBottom>Patient Demographics</Typography>
+                                    <Pie data={patientDemographics} />
+                                </CardContent>
+                            </Card>
+                        </Grid>
+                    </Grid>
+                    
+                    <Grid container spacing={3} style={{ marginTop: '20px' }}>
+                        <Grid item xs={12} md={6}>
+                            <Card>
+                                <CardContent>
+                                    <Typography variant="h6" gutterBottom>Recent Appointments</Typography>
+                                    <TableContainer component={Paper}>
+                                        <Table>
+                                            <TableHead>
+                                                <TableRow>
+                                                    <TableCell>Patient</TableCell>
+                                                    <TableCell>Doctor</TableCell>
+                                                    <TableCell>Time</TableCell>
+                                                </TableRow>
+                                            </TableHead>
+                                            <TableBody>
+                                                {appointments.slice(0, 5).map(appointment => (
+                                                    <TableRow key={appointment.id}>
+                                                        <TableCell>
+                                                            {patients.find(p => p.id === appointment.patient_id)?.name || 'Unknown'}
+                                                        </TableCell>
+                                                        <TableCell>{appointment.doctor_name}</TableCell>
+                                                        <TableCell>{appointment.time}</TableCell>
+                                                    </TableRow>
+                                                ))}
+                                            </TableBody>
+                                        </Table>
+                                    </TableContainer>
+                                </CardContent>
+                            </Card>
+                        </Grid>
+                        <Grid item xs={12} md={6}>
+                            <Card>
+                                <CardContent>
+                                    <Typography variant="h6" gutterBottom>Recent Patients</Typography>
+                                    <TableContainer component={Paper}>
+                                        <Table>
+                                            <TableHead>
+                                                <TableRow>
+                                                    <TableCell>Name</TableCell>
+                                                    <TableCell>Age</TableCell>
+                                                    <TableCell>Gender</TableCell>
+                                                </TableRow>
+                                            </TableHead>
+                                            <TableBody>
+                                                {patients.slice(0, 5).map(patient => (
+                                                    <TableRow key={patient.id}>
+                                                        <TableCell>{patient.name}</TableCell>
+                                                        <TableCell>{patient.age}</TableCell>
+                                                        <TableCell>{patient.gender}</TableCell>
+                                                    </TableRow>
+                                                ))}
+                                            </TableBody>
+                                        </Table>
+                                    </TableContainer>
+                                </CardContent>
+                            </Card>
+                        </Grid>
+                    </Grid>
+                </div>
+            );
+        };
+
+        const theme = createTheme({
+            palette: {
+                primary: {
+                    main: '#1976d2',
+                },
+                secondary: {
+                    main: '#dc004e',
+                },
+                background: {
+                    default: '#f5f5f5',
+                },
+            },
+        });
+
+        function App() {
+            return (
+                <ThemeProvider theme={theme}>
+                    <CssBaseline />
+                    <Dashboard />
+                </ThemeProvider>
+            );
+        }
+
+        const root = ReactDOM.createRoot(document.getElementById('root'));
+        root.render(<App />);
+    </script>
+</body>
+</html>
+    """
+
+if __name__ == '__main__':
+    app.run(debug=True)
