@@ -1,5 +1,4 @@
-flask==3.0.0
-flask-cors==4.0.0
+dash==2.14.2
+plotly==5.18.0
+pandas==2.1.4
 gunicorn==21.2.0
-sqlite3== # This is usually included in Python standard library
-python-dotenv==1.0.0
